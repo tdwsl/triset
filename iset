@@ -1,0 +1,17 @@
+
+16-bit
+64kw 128kb memory
+16 registers A-P
+P is PC
+8 instructions
+2 modes:
+  <ins> ra,rb,#(4 bit immediate)
+  or
+  <ins> ra,rb,rc
+  when bit M is set
+
+MIII AAAA BBBB CCCC
+
+ADD SUB AND NOR
+ROR SLT LDW STW
+

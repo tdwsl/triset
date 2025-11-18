@@ -1,0 +1,24 @@
+;	Hello world
+
+	ADD A,P,#MSG-$
+	ADD O,P,#1
+	ADD P,P,#PUTS-$
+	SUB P,P,#1
+
+MSG	DCW 72
+	DCW 73
+	DCW 33
+	DCW 0
+
+PUTS	LDW C,P,#ADDR-$
+PUTS0	LDW B,A,#0
+	SLT D,B,#1
+	ADD P,P,D
+	ADD P,P,#1
+	ADD P,O,#0
+	STW B,C,#0
+	ADD C,C,#1
+	ADD A,A,#1
+	SUB P,P,#$-PUTS0
+ADDR	DCW 61440
+
