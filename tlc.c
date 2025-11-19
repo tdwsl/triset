@@ -51,28 +51,38 @@ int nnums = 0;
 char *labels[1024];
 unsigned short lbla[1024];
 int nlabels = 0;
-struct ins mem[16384];
+struct ins mem[1024];
 int nmem = 0;
 int nand = 0, nor = 0, nif = 0, ntern;
 
 #define MAXGLOBALS 300
+#define MAXCONST 40
 
 enum {
-  UNDEF=0,
-  FUN,
-  DATA,
-  BSS,
+  UNDEF=-3,
+  FUN=-2,
+  DATA=-1,
+  BSS=0,
+  CONST=UNDEF-MAXCONST,
 };
 
 int globals[MAXGLOBALS];
 int globalt[MAXGLOBALS];
 int nglobals = 0;
+int consts[MAXCONST];
+int nconsts = 0;
 
 int look;
 
-FILE *fp;
+#define MAXLOCALS 15
+
+int locals[MAXLOCALS];
+int nlocals = 0, argc;
+
+FILE *fp, *out;
 char ahc = 0;
 int ln;
+int id = 0;
 
 void getNext(char *buf) {
   char c;
@@ -106,9 +116,29 @@ void getNext(char *buf) {
   }
 }
 
-void err(char *s) {
-  printf("%d: %s\n", ln, s);
+char *str(int t) {
+  static char buf[200];
+  if(t == EOF) sprintf(buf, "EOF");
+  else if(t < ID0) sprintf(buf, "%s", key[t]);
+  else if(t < NUM0) sprintf(buf, "%s", ids[t-ID0]);
+  else sprintf(buf, "%d", nums[t-NUM0]);
+  return buf;
+}
+
+void errh() {
+  printf("%d: ", ln);
+  if(id != 0) printf("in %s: ", ids[id-ID0]);
+}
+
+void err(const char *s) {
+  errh();
+  printf("%s\n", s);
   exit(1);
+}
+
+void errf(const char *fmt, int t) {
+  errh();
+  printf(fmt, str(t)); printf("\n"); exit(1);
 }
 
 void nerr() { err("invalid integer literal"); }
@@ -162,13 +192,6 @@ int next() {
   return look=nids+++ID0;
 }
 
-void print(int t) {
-  if(t == EOF) printf("EOF");
-  else if(t < ID0) printf("%s", key[t]);
-  else if(t < NUM0) printf("%s", ids[t-ID0]);
-  else printf("%d", nums[t-NUM0]);
-}
-
 void dc(unsigned label, unsigned ins, unsigned param) {
   if(!label && nmem && mem[nmem-1].ins == BLANK) label = mem[--nmem].label;
   mem[nmem].ins = ins;
@@ -187,7 +210,7 @@ void op(int n, int o) {
     nmem -= 2;
     dins(o, n, n, mem[nmem+1].ins&15);
   } else {
-    dins(o+8, n, n, mem[nmem-1].ins>>12&15);
+    dins(o+8, n, n, mem[nmem-1].ins&15);
   }
 }
 
@@ -197,7 +220,7 @@ void inc() {
 }
 
 int ir(int r) {
-  if(r != 15) return r+1;
+  if(r != 15 && r != 13) return r+1;
   return r;
 }
 
@@ -278,16 +301,28 @@ int prec(int o) {
   }
 }
 
+int findGlobal(int t) {
+  for(int i = 0; i < nglobals; i++)
+    if(globals[i] == t) return i;
+  return -1;
+}
+
 void compileCom();
-void printAs();
 
 void store(int n, int st) {
   if((st&0x7000) != 0x6000) err("expected lvalue");
   dc(0, st&0xf0ff|0x1000|n<<8, 0);
 }
 
+int findLocal(int t) {
+  for(int i = 0; i < nlocals; i++)
+    if(locals[i] == t) return i;
+  return -1;
+}
+
 void compilePost(int n) {
   unsigned o = nmem;
+  int i;
   if(look >= NUM0) {
     unsigned v = nums[look-NUM0];
     if(v < 16) {
@@ -298,10 +333,19 @@ void compilePost(int n) {
       dins(0, 15, 15, 1);
       dc(0, DCW, v);
     }
-  } else { print(look); printf(" ?\n"); err("unknown value"); }
+  } else if((i = findLocal(look)) != -1) {
+    printf("AAAH: n: %d,%d\n", n, i);
+    dins(6, n, 13, i);
+  } else if((i = findGlobal(look)) != -1) {
+    dins(6, n, 15, 1);
+    dins(0, 15, 15, 1);
+    dc(0, DCL, i);
+    if(globalt[i] != FUN && globalt[i] != UNDEF) {
+      dins(6, n, n, 0);
+    }
+  } else errf("unknown value %s", look);
   for(;;) {
     next();
-    print(look); printf("\n");
     if(look == LB) {
       next();
       compileCom(n+1);
@@ -342,6 +386,7 @@ void compileUnary(int n) {
 void compileOper(int n, int p) {
   if(!p) { compileUnary(n); return; }
   compileOper(n, p-1);
+  printf("on: %s\n", str(look));
   while(prec(look) == p) {
     int o = look; next();
     compileOper(n+1, p-1);
@@ -370,13 +415,11 @@ void compileLand(int n) {
     dins(14, 15, 15, n);
     dc(0, DCL, a);
     dc(0, DCL, b);
-    printAs(); printf("---\n");
     unsigned o = nmem;
     next(); compileOper(n, 8);
     mem[o].label = a+1;
     sltslt(n);
     dc(b+1, BLANK, 0);
-    printAs(); printf("---\n");
   }
 }
 
@@ -433,7 +476,7 @@ void compileAss(int n) {
     int o = look-ADDEQ+ADD;
     int st = mem[nmem-1].ins;
     mem[nmem-1].ins -= 0x0100;
-    next(); compileAss(n);
+    next(); compileAss(n+1);
     compileOp(n, o);
     store(n, st);
   }
@@ -447,43 +490,185 @@ void compileCom(int n) {
 void compileEx() {
   printf("EXPRESSION\n");
   compileCom(0);
+  printf("DONE: %s\n",str(look));
 }
 
-void printAs() {
+void saveAs() {
   for(int i = 0; i < nmem; i++) {
     unsigned ins = mem[i].ins;
-    if(mem[i].label) printf("%s", labels[mem[i].label-1]);
-    printf("\t");
-    if(ins == DCW) printf("DCW %d\n", mem[i].param);
-    else if(ins == DCL) printf("DCW %s\n", labels[mem[i].param]);
-    else if(ins == BLANK) printf("\n");
+    if(mem[i].label) fprintf(out, "_%s", labels[mem[i].label-1]);
+    fprintf(out, "\t");
+    if(ins == DCW) fprintf(out, "DCW %d\n", mem[i].param);
+    else if(ins == DCL) fprintf(out, "DCW _%s\n", labels[mem[i].param]);
+    else if(ins == BLANK) fprintf(out, "\n");
     else {
-      printf("%.3s %c,%c,", "ADDSUBANDNORRORSLTLDWSTW"+(ins>>12&7)*3,
+      fprintf(out, "%.3s %c,%c,", "ADDSUBANDNORRORSLTLDWSTW"+(ins>>12&7)*3,
         (ins>>8&15)+'A', (ins>>4&15)+'A');
-      if(ins&0x8000) printf("%c\n", (ins&15)+'A');
-      else printf("#%d\n", ins&15);
+      if(ins&0x8000) fprintf(out, "%c\n", (ins&15)+'A');
+      else fprintf(out, "#%d\n", ins&15);
+    }
+  }
+  for(int i = 0; i < nglobals; i++) {
+    if(globalt[i] >= BSS) {
+      char *s = str(globals[i]);
+      fprintf(out, "_%s\tDCW D_%s\n", s, s);
+    }
+  }
+  for(int i = 0; i < nglobals; i++) {
+    if(globalt[i] >= BSS) {
+      char *s = str(globals[i]);
+      fprintf(out, "D_%s\tRSW %d\n", s, globalt[i]-BSS);
     }
   }
 }
 
-void checkid(unsigned t) {
-  if(t >= NUM0 || t < ID0) err("invalid identifier");
+void checkid(int t) {
+  if(t >= NUM0 || t < ID0) errf("invalid identifier %s", t);
+  if(findLocal(t) != -1) errf("%s is already defined", t);
+}
+
+void expect(int t) {
+  printf("look: %s\n", str(look));
+  if(look != t) errf("expected %s", t);
+  next();
+}
+
+int evalOper(int p);
+
+int evalUnary() {
+  int n;
+  switch(look) {
+  case SUB: next(); return -evalUnary();
+  case INV: next(); return ~evalUnary();
+  case ADD: next(); return evalUnary();
+  case LP: next(); n = evalOper(10); expect(RP); return n;
+  }
+  if(look >= NUM0) { n = nums[look-NUM0]; next(); return n; }
+  if(look >= ID0) {
+    n = findGlobal(look); next();
+    if(globalt[n] < UNDEF) return consts[globalt[n]-CONST];
+  }
+  errf("failed to evaluate %s", look);
+}
+
+int evalOper(int p) {
+  if(!p) return evalUnary();
+  int a = evalOper(p-1);
+  while(prec(look) == p) {
+    int op = look; next();
+    int b = evalOper(p-1);
+    switch(op) {
+    case ADD: a += b; break;
+    case SUB: a -= b; break;
+    case ANAN: a = a && b; break;
+    case OROR: a = a || b; break;
+    case AND: a &= b; break;
+    case OR: a |= b; break;
+    case XOR: a ^= b; break;
+    case MUL: a *= b; break;
+    case DIV: if(!b) err("division by zero"); a /= b; break;
+    case MOD: if(!b) err("division by zero"); a %= b; break;
+    case EQU: a = a == b; break;
+    case NEQ: a = a != b; break;
+    case LT: a = a < b; break;
+    case GT: a = a > b; break;
+    case LE: a = a <= b; break;
+    case GE: a = a >= b; break;
+    case SHR: a = a >> b; break;
+    case SHL: a = a << b; break;
+    }
+  }
+  return a;
+}
+
+int evalTern() {
+  int n = evalOper(10);
+  if(look == TERN) {
+    next();
+    int a = evalTern();
+    expect(COL);
+    int b = evalTern();
+    return n ? a : b;
+  }
+  return n;
+}
+
+int eval() {
+  return evalTern();
+}
+
+void compileStatement() {
+  if(look == LC) {
+    next();
+    while(look != RC) {
+      if(look == RC) break;
+      compileStatement(); printf("[%s]\n", str(look));
+    }
+    next();
+  } else {
+    compileEx(); expect(SEMI);
+  }
+}
+
+void compileFunction() {
+  nmem = 0;
+  nlocals = 0;
+  while(look != RP) {
+    checkid(look); locals[nlocals++] = look;
+    if(nlocals >= 13) err("too many args in definition");
+    next(); if(look == RP) break;
+    expect(COM);
+  }
+  next();
+  argc = nlocals;
+  if(argc > 13) err("too many args in definition");
+  compileStatement();
+  fprintf(out, "_%s\tSUB N,N,#%d\n", str(id), nlocals);
+  for(int i = 0; i < argc; i++)
+    fprintf(out, "\tSTW %c,N,#%d\n", i+'A', i);
+  fprintf(out, "\tSTW O,N,#%d\n", nlocals);
+  saveAs();
+  fprintf(out, "\tLDW O,N,#%d\n", nlocals);
+  fprintf(out, "\tADD N,N,#%d\n", nlocals+1);
+  fprintf(out, "\tADD P,O,#0\n");
+  nlocals = 0;
 }
 
 void compileFile() {
-  next();
   while(look != EOF) {
+    next();
     checkid(look);
-    print(look); printf("\n");
-    compileEx();
+    id = look; next();
+    int i = findGlobal(id);
+    if(i != -1) {
+      if(globalt[i] == UNDEF && look == LP) {
+        globalt[i] = FUN;
+        next(); compileFunction();
+      } else errf("%s is already defined", id);
+    }
+    globals[i = nglobals++] = id;
+    if(look == SEMI) globalt[i] = BSS+1;
+    else if(look == LB) {
+      next(); int n = eval();
+      expect(RB); expect(COM);
+      if(n <= 0) errf("invalid dimension for %s", id);
+      globalt[i] = n+BSS;
+    } else if(look == LP) {
+      globalt[i] = FUN;
+      next(); compileFunction();
+    } else err("expected definition");
+    id = 0;
   }
 }
 
 int main(int argc, char **args) {
   if(argc < 3) {
-    printf("usage: %s <file1> [<file2> <file3> ...] <output>\n", args[0]);
+    printf("usage: %s <file1.t> [<file2.t> <file3.t> ...] <output.s>\n", args[0]);
     return 1;
   }
+  //out = fopen(args[argc-1], "w");
+  //if(!out) { printf("failed to open %s\n", args[argc-1], return 1; }
+  out = stdout;
   for(int i = 1; i < argc-1; i++) {
     ln = 1;
     fp = fopen(args[i], "r");
@@ -491,6 +676,6 @@ int main(int argc, char **args) {
     compileFile();
     fclose(fp);
   }
-  printAs();
+  //fclose(out);
   return 0;
 }
